@@ -1,5 +1,5 @@
 {
-  "initialized": false,
+  "initialized": true,
   "last_event": {},
   "last_signal": {},
   "active": {},
@@ -12,11 +12,22 @@
     "balance": 100.0,
     "next_trade_number": 1,
     "total_realized_pnl": 0.0,
-    "period_opening_balances": {},
-    "equity_curve": []
+    "period_opening_balances": {
+      "DAY|2026-09-11": 100.0,
+      "MONTH|2026-09": 100.0,
+      "WEEK|2026-09-07": 100.0
+    },
+    "equity_curve": [
+      {
+        "time": "2026-09-11 10:56:06 UTC",
+        "balance": 100.0,
+        "reason": "heartbeat"
+      }
+    ]
   },
   "telegram_update_offset": 0,
   "last_daily_report": "",
   "last_monthly_report": "",
-  "last_weekly_report": ""
+  "last_weekly_report": "",
+  "weekly_stats": {}
 }
