@@ -229,6 +229,14 @@ def load_state():
         {},
     )
 
+    # Per-symbol bootstrap marker.  A missing marker means we have never
+    # established a baseline for that symbol, so historical signals are
+    # recorded but never sent as new Telegram signals.
+    state.setdefault(
+        "signal_baseline",
+        {},
+    )
+
     state.setdefault(
         "active",
         {},
@@ -1408,12 +1416,13 @@ def build_signal(
                         f"{low:.12f}"
                     ),
                     "side": "BUY",
+                    "event_direction": "bull",
+                    "candidate_index": idx,
+                    "candidate_candle": "BEARISH",
                     "zone_low": low,
                     "sl": low,
                     "event_index": event_idx,
-                    "event_time": (
-                        event_time.isoformat()
-                    ),
+                    "event_time": event_time.isoformat(),
                 }
 
     else:
@@ -1457,12 +1466,13 @@ def build_signal(
                         f"{high:.12f}"
                     ),
                     "side": "SELL",
+                    "event_direction": "bear",
+                    "candidate_index": idx,
+                    "candidate_candle": "BULLISH",
                     "zone_high": high,
                     "sl": high,
                     "event_index": event_idx,
-                    "event_time": (
-                        event_time.isoformat()
-                    ),
+                    "event_time": event_time.isoformat(),
                 }
 
     return None
@@ -2446,30 +2456,53 @@ def analyze_symbol(state, info, df):
     signals = latest_signals(df)
     if not signals:
         return
-    if not state["initialized"]:
-        latest = signals[-1]
-        state["last_event"][info["symbol"]] = latest["event_time"]
-        state["last_signal"][info["symbol"]] = latest["id"]
+
+    symbol = info["symbol"]
+    latest = signals[-1]
+
+    # HARD DIRECTION CHECK:
+    # bull event + bearish candidate candle = BUY only.
+    # bear event + bullish candidate candle = SELL only.
+    # Never allow a signal side that contradicts its source event/candle.
+    expected_side = {"bull": "BUY", "bear": "SELL"}.get(latest.get("event_direction"))
+    if expected_side and latest.get("side") != expected_side:
+        print(f"{symbol}: rejected inconsistent signal side={latest.get('side')} expected={expected_side}")
         return
 
-    old_event = state["last_event"].get(info["symbol"])
-    old_signal = state["last_signal"].get(info["symbol"])
-    new_signals = [
-        signal for signal in signals
-        if (not old_event or signal["event_time"] > old_event)
-        and (not old_signal or signal["id"] != old_signal)
-    ]
-    if not new_signals:
+    old_event = state["last_event"].get(symbol)
+    old_signal = state["last_signal"].get(symbol)
+
+    # FIRST TIME THIS SYMBOL IS SEEN: establish a baseline only.
+    # This prevents old/historical signals from being sent after a fresh
+    # state file, after adding a new coin, or after the state is missing
+    # that symbol.
+    if symbol not in state.get("signal_baseline", {}):
+        state.setdefault("signal_baseline", {})[symbol] = latest["event_time"]
+        state["last_event"][symbol] = latest["event_time"]
+        state["last_signal"][symbol] = latest["id"]
+        print(f"{symbol}: baseline set to {latest['event_time']} ({latest['side']}); no old signal sent.")
         return
-    signal = new_signals[-1]
+
+    # Only the latest event after the stored event is eligible.  We never
+    # walk through a backlog of historical signals.
+    if old_event and latest["event_time"] <= old_event:
+        return
+
+    if old_signal and latest["id"] == old_signal:
+        return
+
+    signal = latest
+
+    # Advance the per-symbol cursor BEFORE any filters. This guarantees that
+    # an old signal which fails a filter cannot be re-sent on every run.
+    state["last_event"][symbol] = signal["event_time"]
+    state["last_signal"][symbol] = signal["id"]
 
     # Calculate the OB distance before applying the 4% filter.
     signal = add_ob_distance(signal, df)
     ob_distance = signal_ob_distance_percent(signal)
     if not signal_ob_distance_allowed(signal):
         print(f"{info['symbol']}: signal disabled; OB distance {ob_distance:.2f}% > {MAX_OB_DISTANCE_PERCENT:.2f}%.")
-        state["last_event"][info["symbol"]] = signal["event_time"]
-        state["last_signal"][info["symbol"]] = signal["id"]
         save_state(state)
         return
 
@@ -2477,16 +2510,12 @@ def analyze_symbol(state, info, df):
     daily_signal = latest_daily_order(daily_df)
     if not daily_order_matches(signal, daily_signal):
         print(f"{info['symbol']}: {signal['side']} 4H signal disabled because Daily order is missing/opposite.")
-        state["last_event"][info["symbol"]] = signal["event_time"]
-        state["last_signal"][info["symbol"]] = signal["id"]
         save_state(state)
         return
 
     # One active trade per symbol, preserving the existing state model.
     if info["symbol"] in state["active"]:
         print(f"{info['symbol']}: active trade already exists; new signal ignored.")
-        state["last_event"][info["symbol"]] = signal["event_time"]
-        state["last_signal"][info["symbol"]] = signal["id"]
         save_state(state)
         return
 
