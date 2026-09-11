@@ -982,25 +982,25 @@ def unwrap_lbank_data(payload):
 
 
 def get_lbank_futures_instruments():
-    payload = lbank_json_get(
-        LBANK_FUTURES_BASE,
-        "/cfd/openApi/v1/pub/instrument",
-        {"productGroup": LBANK_PRODUCT_GROUP},
-    )
-    data = unwrap_lbank_data(payload)
-    if not isinstance(data, list):
-        raise RuntimeError("LBank Futures instrument response is not a list.")
-    return [item for item in data if isinstance(item, dict)]
+    """Deprecated compatibility helper.
+
+    The scanner no longer calls the LBank Futures instrument endpoint because
+    that endpoint can return HTTP 403 from GitHub Actions runners. Eligibility
+    is determined from LBank's public spot trading-pair list instead.
+    """
+    return []
 
 
 def get_lbank_spot_pairs():
+    """Return LBank's public spot trading pairs.
+
+    This is the authoritative public list used to decide whether a requested
+    coin exists on LBank. We try both documented/current hosts.
+    """
     last_error = None
     for base in (LBANK_SPOT_BASE, LBANK_SPOT_FALLBACK_BASE):
         try:
-            payload = lbank_json_get(
-                base,
-                "/v2/currencyPairs.do",
-            )
+            payload = lbank_json_get(base, "/v2/currencyPairs.do")
             data = unwrap_lbank_data(payload)
 
             if isinstance(data, list):
@@ -1017,19 +1017,20 @@ def get_lbank_spot_pairs():
                         if pair:
                             pairs.append(str(pair))
                 if pairs:
+                    print(f"LBank spot pair list loaded from {base}: {len(pairs)} pairs")
                     return base, pairs
 
             last_error = RuntimeError(
-                f"Unexpected LBank spot pair response from {base}"
+                f"Unexpected LBank spot pair response from {base}: {payload}"
             )
         except Exception as error:
             last_error = error
             print(f"LBank spot pair request failed on {base}: {error}")
 
-    # Do not fail the whole scanner merely because the pair-list endpoint is
-    # unavailable. Kline requests below will validate each pair individually.
-    print(f"LBank spot pair list unavailable: {last_error}")
-    return LBANK_SPOT_BASE, []
+    raise RuntimeError(
+        "Could not retrieve LBank public trading-pair list from either API host. "
+        f"Last error: {last_error}"
+    )
 
 
 def normalize_lbank_pair(value):
@@ -1041,6 +1042,14 @@ def normalize_lbank_pair(value):
 
 
 def get_lbank_crypto_symbols():
+    """Resolve requested symbols strictly against LBank public spot pairs.
+
+    The old implementation queried the Futures instrument endpoint first. That
+    endpoint is public in the documentation but can return HTTP 403 from a
+    GitHub-hosted runner. For this scanner we do not need that endpoint: the
+    public spot pair list is enough to filter the user's requested coin list,
+    and the same public LBank API provides 4H/1D Klines.
+    """
     requested = read_source_symbols()
     requested_bases = []
     seen = set()
@@ -1051,105 +1060,61 @@ def get_lbank_crypto_symbols():
             seen.add(base)
             requested_bases.append(base)
 
-    instruments = get_lbank_futures_instruments()
-
-    futures_by_base = {}
-    for item in instruments:
-        symbol = str(item.get("symbol") or "").strip()
-        base_currency = str(
-            item.get("baseCurrency")
-            or item.get("symbolName")
-            or ""
-        ).upper().strip()
-
-        normalized_symbol = normalize_requested_symbol(symbol)
-        if not base_currency:
-            base_currency = normalized_symbol
-
-        if normalized_symbol:
-            futures_by_base.setdefault(normalized_symbol, []).append(item)
-        if base_currency:
-            futures_by_base.setdefault(base_currency, []).append(item)
-
     spot_base_url, spot_pairs = get_lbank_spot_pairs()
-    spot_map = {}
 
+    # Only USDT spot pairs are considered. This prevents unrelated BTC/ETH
+    # quote pairs from creating duplicate candidates for the same coin.
+    spot_map = {}
     for pair in spot_pairs:
         normalized = normalize_lbank_pair(pair)
-        if not normalized:
+        if not normalized.endswith("_usdt"):
             continue
-        base = normalized.removesuffix("_usdt")
-        spot_map.setdefault(base.upper(), normalized)
+        base = normalized[:-5].upper()
+        if base:
+            spot_map.setdefault(base, normalized)
 
     rows = []
-    missing_futures = []
-    missing_spot = []
+    missing = []
 
     for base in requested_bases:
-        candidates = futures_by_base.get(base, [])
-        if not candidates:
-            missing_futures.append(base)
-            continue
-
-        # Prefer a USDT contract when multiple representations are returned.
-        contract = candidates[0]
-        for candidate in candidates:
-            symbol = str(candidate.get("symbol") or "").upper()
-            clear = str(candidate.get("clearCurrency") or "").upper()
-            if "USDT" in symbol or clear == "USDT":
-                contract = candidate
-                break
-
-        contract_symbol = str(contract.get("symbol") or "").strip()
         spot_pair = spot_map.get(base)
-
         if not spot_pair:
-            # Most LBank symbols follow BASE_USDT. Keep this as a candidate;
-            # download_4h/download_1d will verify it against actual Kline data.
-            spot_pair = f"{base.lower()}_usdt"
-            missing_spot.append(base)
+            missing.append(base)
+            continue
 
         rows.append(
             {
                 "symbol": spot_pair,
-                "name": contract.get("symbolName") or base,
+                "name": base,
                 "source_symbol": base + "USDT",
-                "futures_symbol": contract_symbol,
-                "base_currency": contract.get("baseCurrency") or base,
-                "clear_currency": contract.get("clearCurrency") or "USDT",
-                "price_tick": contract.get("priceTick"),
-                "volume_tick": contract.get("volumeTick"),
-                "min_order_volume": contract.get("minOrderVolume"),
-                "min_order_cost": contract.get("minOrderCost"),
-                "default_leverage": contract.get("defaultLeverage"),
+                "futures_symbol": "",
+                "base_currency": base,
+                "clear_currency": "USDT",
+                "price_tick": None,
+                "volume_tick": None,
+                "min_order_volume": None,
+                "min_order_cost": None,
+                "default_leverage": None,
                 "spot_base_url": spot_base_url,
             }
         )
 
     order = {base: i for i, base in enumerate(requested_bases)}
-    rows.sort(key=lambda row: order.get(normalize_requested_symbol(row["source_symbol"]), 999999))
+    rows.sort(
+        key=lambda row: order.get(
+            normalize_requested_symbol(row["source_symbol"]), 999999
+        )
+    )
 
     print(f"LBank requested symbols : {len(requested_bases)}")
-    print(f"LBank Futures matched   : {len(rows)}")
-    print(f"LBank Futures missing    : {len(missing_futures)}")
+    print(f"LBank spot matched      : {len(rows)}")
+    print(f"LBank spot missing      : {len(missing)}")
 
-    if missing_futures:
-        print(
-            "Not listed on LBank Futures: "
-            + ", ".join(missing_futures)
-        )
-
-    if missing_spot:
-        print(
-            "Spot pair not present in pair-list; direct Kline validation will be used for: "
-            + ", ".join(missing_spot)
-        )
+    if missing:
+        print("Not listed on LBank Spot: " + ", ".join(missing))
 
     if rows:
-        print(
-            "Final LBank symbols: "
-            + ", ".join(row["symbol"] for row in rows)
-        )
+        print("Final LBank symbols: " + ", ".join(row["symbol"] for row in rows))
 
     return rows
 
