@@ -1131,14 +1131,37 @@ def _lbank_kline(symbol, size, interval_type):
 
     for base in (LBANK_SPOT_BASE, LBANK_SPOT_FALLBACK_BASE):
         try:
+            requested_size = min(int(size), 2000)
+
+            # LBank's REST Kline `time` parameter is the timestamp from which
+            # bars are returned forward. Using "now" asks for bars after the
+            # current moment and can therefore return an empty list.
+            interval_seconds = {
+                "minute1": 60,
+                "minute5": 5 * 60,
+                "minute15": 15 * 60,
+                "minute30": 30 * 60,
+                "hour1": 60 * 60,
+                "hour4": 4 * 60 * 60,
+                "hour8": 8 * 60 * 60,
+                "hour12": 12 * 60 * 60,
+                "day1": 24 * 60 * 60,
+                "week1": 7 * 24 * 60 * 60,
+                "month1": 30 * 24 * 60 * 60,
+            }.get(interval_type, 4 * 60 * 60)
+
+            start_time = int(
+                datetime.now(timezone.utc).timestamp()
+            ) - (requested_size + 10) * interval_seconds
+
             payload = lbank_json_get(
                 base,
                 "/v2/kline.do",
                 {
                     "symbol": symbol,
-                    "size": min(int(size), 2000),
+                    "size": requested_size,
                     "type": interval_type,
-                    "time": int(datetime.now(timezone.utc).timestamp()),
+                    "time": start_time,
                 },
             )
 
@@ -1146,6 +1169,12 @@ def _lbank_kline(symbol, size, interval_type):
             if not isinstance(data, list):
                 raise RuntimeError(
                     f"Invalid Kline response for {symbol}: {payload}"
+                )
+
+            if not data:
+                raise RuntimeError(
+                    f"Empty Kline response for {symbol} {interval_type}; "
+                    f"requested {requested_size} bars from {start_time}"
                 )
 
             rows = []
