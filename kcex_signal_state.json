@@ -201,7 +201,7 @@
   "portfolio": {
     "initial_balance": 100.0,
     "balance": 100.0,
-    "next_trade_number": 31,
+    "next_trade_number": 61,
     "total_realized_pnl": 0.0,
     "period_opening_balances": {
       "DAY|2026-09-11": 100.0,
